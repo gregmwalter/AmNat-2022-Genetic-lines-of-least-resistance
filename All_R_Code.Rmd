@@ -1,0 +1,1643 @@
+---
+title: Experimental evidence that phenotypic evolution but not plasticity occurs along genetic lines of least resistance in homogeneous environments
+author: "Greg Walter"
+date: "30 September 2022"
+---
+
+# Load packages:
+```{r, include=FALSE}
+library(MASS)
+library(matrixcalc)
+library(MCMCglmm)
+library(gdata)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(tidyr)
+library(SimDesign)
+library(data.table)
+
+# Update ggplot settings
+theme_set(theme_bw(base_size = 12))
+theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.grid = element_blank(), legend.position="none", strip.background = element_blank(), text = element_text(family = 'Times', size = 12))
+
+```
+
+# Code to run the animal model to estimate genetic variance in wing shape
+```{r, eval=FALSE}
+
+# Code below is sent to a cluster for a job array using the shell script (found at the bottom of this file). Each job in the array runs a model for a different assay/treatment combination
+# Presented is the observed models with replicate included as a random effect to estimate 12 G-matrices (n=12 for the job array). To estimate all 60, use n=60 in the job array shell script and include replicate in the 3rd line below.
+
+dat <- read.csv("Data_foranimalmodel.csv", header=TRUE)
+
+# dat$levels <- paste(dat$treatment, "_", dat$assay, sep="") # for G in each treatment
+dat$levels <- paste(dat$treatment, "_", dat$assay, dat$replicate, sep="") # for estimating all 60 G-matrices
+
+lvls <- unique(dat$levels)
+
+id <- as.numeric(commandArgs(TRUE))
+
+dat.new <- droplevels(dat[dat$levels %in% lvls[id[1]],])
+
+# Mean scale data
+names(dat.new)
+mn <- colMeans(dat.new[,13:17])
+dat.new[,13:17] <- scale(dat.new[,13:17], center=FALSE, scale=mn)
+
+# Create pedigree
+ped <- dat.new[,9:11]
+
+Ainv <- inverseA(ped)$Ainv
+
+p <- diag(apply(dat.new[13:17], 2, var))
+
+priorcau <- list(R = list(V = p*0.25, nu = 4.002),
+                 G = list(G1 = list(V = diag(5), nu = 5, alpha.mu = rep("0",5), alpha.V = p),
+                          G2 = list(V = diag(5), nu = 5, alpha.mu = rep("0",5), alpha.V = p)))
+
+mod <- MCMCglmm(cbind(centroid, line9.10, angle7.8.9, angle3.10.4, angle2.4.8) ~ trait*sex - 1,
+                 random = ~ us(trait):id + us(trait):dam, # include  + us(trait):replicate when estimating for each treatment (i.e. not all 60 independent matrices)
+                 rcov = ~ us(trait):units,
+                 family = rep("gaussian",5),
+                 ginverse = list(id = Ainv),
+                 pr = T,
+                 nitt = 1100000, burnin = 100000, thin = 1000, 
+                 #nitt = 11, thin = 1, burnin = 1,
+                 prior = priorcau, verbose = TRUE,
+                 data = dat.new)
+
+filename <- paste("m", lvls[id[1]], ".RData", sep="")
+
+save(mod, file=filename)
+
+```
+
+# Load models (from above output) and construct arrays 
+## Each array contains the nxn matrix for the 60 replicate cages and for each MCMC sample
+```{r, eval=FALSE}
+
+#### Load all 60 G-matrices
+# Model names
+treats <- paste("m", rep(rep(c("c_","h_","mc_","mh_","s_","t_"),each=5),2), rep(c("d","u"),each=30), rep(1:5,12), sep="")
+
+# Loop to load models and then save G, M and R matrices
+## Arrays are of the form n x n x m x MCMCsamp
+## n=number of traits, m=number of matrices, MCMCsamp=MCMC samples
+Garray <- array(,c(5,5,60,1000))
+Marray <- array(,c(5,5,60,1000))
+Rarray <- array(,c(5,5,60,1000))
+for (j in 1:60){ # For each replicate cage
+  
+  # Load the model
+  load(paste("./G_FOLDER/",treats[j],".Rdata", sep = "")) # Where G_FOLDER is the subfolder containing the 60 G-matrices
+  
+  # construct and save the matrices for each MCMC iteration
+  for (i in 1:1000){ # MCMC samples
+          
+  Garray[,,j,i] <- matrix(mod$VCV[i,1:25], ncol=5) # Va is taken from the 'id' component
+  Marray[,,j,i] <- matrix(mod$VCV[i,26:50], ncol=5) # Dam component
+  Rarray[,,j,i] <- matrix(mod$VCV[i,51:75], ncol=5) # Residual variance
+  
+  }
+  
+  rm(mod)
+}
+
+save(Garray, file="G_replicatecages.Rdata")
+save(Marray, file="M_replicatecages.Rdata")
+save(Rarray, file="R_replicatecages.Rdata")
+
+```
+
+# Load and average matrices across replicate cages within each treatment
+```{r}
+
+load("./G_observed_replicatecages/G_replicatecages.Rdata")
+load("./G_observed_replicatecages/M_replicatecages.Rdata")
+load("./G_observed_replicatecages/R_replicatecages.Rdata")
+
+## Calculate mean G, M and R matrices
+G <- array(,c(5,5,12,1000))
+G[,,1,] <- apply(Garray[,,1:5,], c(1:2,4), mean)
+G[,,2,] <- apply(Garray[,,6:10,], c(1:2,4), mean)
+G[,,3,] <- apply(Garray[,,11:15,], c(1:2,4), mean)
+G[,,4,] <- apply(Garray[,,16:20,], c(1:2,4), mean)
+G[,,5,] <- apply(Garray[,,21:25,], c(1:2,4), mean)
+G[,,6,] <- apply(Garray[,,26:30,], c(1:2,4), mean)
+G[,,7,] <- apply(Garray[,,31:35,], c(1:2,4), mean)
+G[,,8,] <- apply(Garray[,,36:40,], c(1:2,4), mean)
+G[,,9,] <- apply(Garray[,,41:45,], c(1:2,4), mean)
+G[,,10,] <- apply(Garray[,,46:50,], c(1:2,4), mean)
+G[,,11,] <- apply(Garray[,,51:55,], c(1:2,4), mean)
+G[,,12,] <- apply(Garray[,,56:60,], c(1:2,4), mean)
+
+M <- array(,c(5,5,12,1000))
+M[,,1,] <- apply(Marray[,,1:5,], c(1:2,4), mean)
+M[,,2,] <- apply(Marray[,,6:10,], c(1:2,4), mean)
+M[,,3,] <- apply(Marray[,,11:15,], c(1:2,4), mean)
+M[,,4,] <- apply(Marray[,,16:20,], c(1:2,4), mean)
+M[,,5,] <- apply(Marray[,,21:25,], c(1:2,4), mean)
+M[,,6,] <- apply(Marray[,,26:30,], c(1:2,4), mean)
+M[,,7,] <- apply(Marray[,,31:35,], c(1:2,4), mean)
+M[,,8,] <- apply(Marray[,,36:40,], c(1:2,4), mean)
+M[,,9,] <- apply(Marray[,,41:45,], c(1:2,4), mean)
+M[,,10,] <- apply(Marray[,,46:50,], c(1:2,4), mean)
+M[,,11,] <- apply(Marray[,,51:55,], c(1:2,4), mean)
+M[,,12,] <- apply(Marray[,,56:60,], c(1:2,4), mean)
+
+R <- array(,c(5,5,12,1000))
+R[,,1,] <- apply(Rarray[,,1:5,], c(1:2,4), mean)
+R[,,2,] <- apply(Rarray[,,6:10,], c(1:2,4), mean)
+R[,,3,] <- apply(Rarray[,,11:15,], c(1:2,4), mean)
+R[,,4,] <- apply(Rarray[,,16:20,], c(1:2,4), mean)
+R[,,5,] <- apply(Rarray[,,21:25,], c(1:2,4), mean)
+R[,,6,] <- apply(Rarray[,,26:30,], c(1:2,4), mean)
+R[,,7,] <- apply(Rarray[,,31:35,], c(1:2,4), mean)
+R[,,8,] <- apply(Rarray[,,36:40,], c(1:2,4), mean)
+R[,,9,] <- apply(Rarray[,,41:45,], c(1:2,4), mean)
+R[,,10,] <- apply(Rarray[,,46:50,], c(1:2,4), mean)
+R[,,11,] <- apply(Rarray[,,51:55,], c(1:2,4), mean)
+R[,,12,] <- apply(Rarray[,,56:60,], c(1:2,4), mean)
+
+save(G, file="G_observed.Rdata")
+
+#### Save G-matrices ####
+# Function to present genetic variances
+funvars <- function(x) {  paste(round(apply(x, 1:2, mean)*1000,3), " (", 
+                            round(apply(x, 1:2, function(x) HPDinterval(as.mcmc(x),prob=0.9)[1])*1000,3),
+                            ", ",
+                            round(apply(x, 1:2, function(x) HPDinterval(as.mcmc(x),prob=0.9)[2])*1000,3),
+                            ")", sep="")  }
+
+# Calculate genetic correlations
+Gcor <- array(,c(5,5,12,1000))
+for (i in 1:1000){
+        for (j in 1:12){
+                Gcor[,,j,i] <- cov2cor(G[,,j,i])
+        }
+}
+
+# Function to present genetic correlations
+funcors <- function(x) {  paste(round(apply(x, 1:2, mean),2), " (", 
+                            round(apply(x, 1:2, function(x) HPDinterval(as.mcmc(x),prob=0.9)[1]),2),
+                            ", ",
+                            round(apply(x, 1:2, function(x) HPDinterval(as.mcmc(x),prob=0.9)[2]),2),
+                            ")", sep="")  }
+
+# Construct matrices with correlations below the diagonal
+Gmat <- matrix(nrow=30, ncol=10)
+for (i  in 1:6){
+        
+        Gmat.col <- matrix(funvars(G[,,i,]), ncol=5)
+        lowerTriangle(Gmat.col) <- lowerTriangle(matrix(funcors(Gcor[,,i,]),ncol=5))
+        
+        Gmat[(5*i-4):(5*i),1:5] <- Gmat.col
+
+        Gmat.hot <- matrix(funvars(G[,,6+i,]), ncol=5)
+        lowerTriangle(Gmat.hot) <- lowerTriangle(matrix(funcors(Gcor[,,6+i,]),ncol=5))
+        
+        Gmat[(5*i-4):(5*i),6:10] <- Gmat.hot
+        rm(Gmat.col, Gmat.hot)
+        
+}
+
+write.csv(Gmat, "Table_Gmatrices.csv")
+
+#### Save eigenanalyses of G ####
+
+# Function for matrix projection
+proj <- function(x) {  apply(eigen(x)$vectors[,1:3], 2, function(y) t(y) %*% x %*% y)  }
+
+# Loop across each G-matrix (n=6) and save the first three eigenvectors
+Emat <- matrix(nrow=18, ncol=18)
+for (i in 1:6){
+        
+        # Eigenvalues
+        Emat[1,(i*3-2):(i*3)] <- round(eigen(apply(G[,,i,], 1:2, mean))$values[1:3] * 1000, 2)
+        Emat[10,(i*3-2):(i*3)] <- round(eigen(apply(G[,,6+i,], 1:2, mean))$values[1:3] * 1000, 2)
+        
+        # HPD
+        Emat[2:3,(i*3-2):(i*3)] <- round(apply(apply(G[,,i,], 3, proj), 1, function(x) HPDinterval(as.mcmc(x), prob=0.9))*1000,2)
+        Emat[11:12,(i*3-2):(i*3)] <- round(apply(apply(G[,,6+i,], 3, proj), 1, function(x) HPDinterval(as.mcmc(x), prob=0.9))*1000,2)
+
+        # Proportion
+        Emat[4,(i*3-2):(i*3)] <- round(eigen(apply(G[,,i,], 1:2, mean))$values / sum(eigen(apply(G[,,i,], 1:2, mean))$values), 2)[1:3]
+        Emat[13,(i*3-2):(i*3)] <- round(eigen(apply(G[,,6+i,], 1:2, mean))$values / sum(eigen(apply(G[,,6+i,], 1:2, mean))$values), 2)[1:3]
+        # Vectors
+        Emat[5:9,(i*3-2):(i*3)] <- round(eigen(apply(G[,,i,], 1:2, mean))$vectors[,1:3], 2)
+        Emat[14:18,(i*3-2):(i*3)] <- round(eigen(apply(G[,,6+i,], 1:2, mean))$vectors[,1:3], 2)
+}
+
+row.names(Emat) <- rep(c("Eigenvalues", "HPDlower","HPDupper", "Proportion", "Centroid", "Line 9-10", "7-8-9","3-10-4","2-4-8"),2)
+colnames(Emat) <- rep(paste("e",1:3, sep=""), 6)
+
+write.csv(Emat, "Table_EigenG.csv")
+
+#### Graph genetic variances ####
+# Mean G
+mnvar <- apply(G, 3:4, diag)
+dim(mnvar) <- c(60, 1000)
+
+Gnames <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spatial", "Temporal")
+traitnames <- c("1. Centroid","2. Line 9-10","3. Angle 7-8-9","4. Angle 3-10-4","5. Angle 2-4-8")
+
+vars <- data.frame(Assay=rep(c("Cold","Hot"),each=30), treat=rep(rep(Gnames,each=5),2), Trait=rep(traitnames, 12), Variance=rowMeans(mnvar), t(apply(mnvar, 1, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+# Replicate G
+repvar <- apply(Garray, 1:3, mean)
+repvar2 <- apply(repvar, 3, diag)
+
+repvars <- data.frame(Assay=rep(c("Cold","Hot"),each=150), treat=rep(rep(Gnames,each=25),2), Replicate=rep(rep(1:5,each=5),12), Trait=rep(traitnames, 60), Variance=c(repvar2), X1=NA, X2=NA)
+
+pd = position_dodge(width=0.4)
+
+p0 <- ggplot(data=repvars, aes(x=Assay, y=Variance)) +
+        geom_point(data=repvars, aes(shape=treat, colour=treat, fill=treat, size=treat), position=pd, alpha=0.2) +
+        geom_errorbar(data=vars, aes(linetype=treat, colour=treat, ymin=X1, ymax=X2), width=0.15, position=pd) +
+        geom_point(data=vars, aes(shape=treat, colour=treat, fill=treat, size=treat), position=pd) +
+        scale_shape_manual(values=c(20,20,21,21,23,24, 20,20,21,21,23,24)) +
+        scale_linetype_manual(values=rep(rep(c("solid","dashed","solid"),each=2),2)) +
+        scale_fill_manual(values=rep(c("blue","red","white","white","grey","black"),2)) +
+        scale_colour_manual(values=rep(c("blue","red","blue","red","grey","black"),2)) +
+        scale_size_manual(values=c(2.5,2.5,2,2,2,2, 2.5,2.5,2,2,2,2)) +
+        labs(y="Genetic variance", x="Assay") +
+        theme_update(legend.position="bottom") +
+        facet_wrap(~Trait, ncol=5, scales="free_y"); p0
+
+ggsave(plot = p0, height = 130, width = 360, dpi = 300, units = "mm", filename="Graph0_Variances.pdf", useDingbats = FALSE)
+
+```
+
+# Test 1: Does the environment affect genetic variance?
+
+## Part A - Does environmental heterogeneity change multivariate evolvability?
+```{r}
+
+obj <- c("G", "M", "R", "Garray", "Marray", "Rarray")
+
+rm(list=setdiff(ls(), obj))
+
+obj <- objects()
+
+#### Estimate Kirkpatrick's measures of evolvability ####
+## Contstruct functions for each metric
+# A) Dimensionality (sum of eigenvalues / eigenvalue 1)
+g1d <- apply(G, 3:4, function(x) sum(eigen(x)$values)/eigen(x)$values[1])
+
+# B) Maximum evolvability (square root of first eigenvalue)
+g2d <- apply(G, 3:4, function(x) sqrt(eigen(x)$values[1]))
+
+# C) Trace (total genetic variance)
+g3d <- apply(G, 3:4, function(x) sum(diag(x)))
+
+# Functions to calculate HPD intervals (and round the numbers for the output table)
+dis1 <- function(x) { paste(round(rowMeans(x),2), " (", 
+                            round(apply(x, 1, function(y) HPDinterval(as.mcmc(y), prob=0.9)[1]),2), ", ", 
+                            round(apply(x, 1, function(y) HPDinterval(as.mcmc(y), prob=0.9)[2]),2), ")", sep="") }
+
+dis2 <- function(x) { paste(round(rowMeans(x),4), " (", 
+                            round(apply(x, 1, function(y) HPDinterval(as.mcmc(y), prob=0.9)[1]),4), ", ", 
+                            round(apply(x, 1, function(y) HPDinterval(as.mcmc(y), prob=0.9)[2]),4), ")", sep="") }
+
+treats <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spatial", "Temporal")
+
+sumG <- data.frame(Variance="G", Assay=rep(c("Cold","Hot"),each=6), Treatment=rep(treats,2), Dimensionality=dis1(g1d), MaxEvolvability=dis2(g2d), Trace=dis2(g3d))
+
+write.csv(sumG, "Table_KirkpatrickMetrics.csv")
+
+```
+
+## Part B - Does G change across treatments?
+```{r}
+
+rm(list=setdiff(ls(), obj))
+
+obj <- objects()
+
+#### Covariance tensor function from Aguirre et al. (2014)
+
+#START of tensor function
+covtensor <- function(Gs){
+        if (dim(Gs)[[1]] != dim(Gs)[[2]]){
+                stop("G array must be of order n x n x m x MCMCsamp")
+        }
+        if (is.na(dim(Gs)[4])) {
+                stop("There are no MCMCsamples")
+        }
+        neigten <- n*(n+1)/2 
+        #Number of eigentensors
+        MCMC.S <- array(,c(neigten, neigten, MCMCsamp))
+        dimnames(MCMC.S) <- list(paste("e", 1:neigten, sep=""), paste("e", 1:neigten, sep=""))
+        for (k in 1:MCMCsamp){
+                MCMCG <- Gs[,,,k] 
+                MCMCvarmat <- t(apply(MCMCG, 3, diag)) 
+                #find the variances of the kth G and store them 
+                MCMCcovmat <- t(apply(MCMCG, 3, lowerTriangle)) 
+                #find the covariances of the kth G and store them
+                MCMC.S[1:n,1:n, k] <- cov(MCMCvarmat, MCMCvarmat) 
+                #fill the upper left quadrant of the kth S
+                MCMC.S[(n+1):neigten,(n+1):neigten, k] <- 2*cov(MCMCcovmat, MCMCcovmat)
+                #fill the lower right quadrant of the kth S
+                MCMC.S[1:n,(n+1):neigten, k] <- sqrt(2)*cov(MCMCvarmat, MCMCcovmat)
+                #fill the upper right quadrant of the kth S
+                MCMC.S[(n+1):neigten,1:n, k] <- sqrt(2)*cov(MCMCcovmat, MCMCvarmat)
+                #fill the lower left quadrant of the kthS
+        }  
+        av.S <- apply(MCMC.S, 1:2, mean)
+        #posterior mean S
+        av.S.val <- eigen(av.S)$values
+        #eigenvalues of posterior mean S 
+        av.S.vec <- eigen(av.S)$vectors
+        #eigenvalues of posterior mean S
+        eTmat <- array(, c(n, n, neigten))
+        dimnames(eTmat) <- list(traitnames, traitnames, paste("E", 1:neigten, sep=""))  
+        for (i in 1:neigten){
+                emat <- matrix(0, n, n) 
+                lowerTriangle(emat) <- 1/sqrt(2)*av.S.vec[(n+1):neigten,i]
+                emat <- emat + t(emat)
+                diag(emat) <- av.S.vec[1:n,i]
+                eTmat[,,i] <- emat 
+        }
+        #construct the second-order eigentensors of posterior mean S
+        eT.eigen <- array(, c(n+1, n, neigten))
+        for (i in 1:neigten){
+                eT.eigen[1,,i] <- t(eigen(eTmat[,,i])$values) 
+                #Eigenvalues of the ith eigentensor
+                eT.eigen[2:(n+1),,i] <- eigen(eTmat[,,i])$vectors 
+                #Eigenvectors of the ith eigentensor
+                eT.eigen[,,i] <- eT.eigen[,order(abs(eT.eigen[1,,i]), decreasing = TRUE), i]
+        }
+        MCMC.S.val <- matrix(, MCMCsamp, neigten)
+        colnames(MCMC.S.val) <- paste("E", 1:neigten, sep="")
+        for (i in 1:MCMCsamp){
+                for(j in 1:neigten){
+                        MCMC.S.val[i,j] <- t(av.S.vec[,j]) %*% MCMC.S[,,i] %*% av.S.vec[,j]
+                }
+        }
+        #posterior distribution of the genetic variance for the eigenvectors of posterior mean S
+        av.G.coord <- array(, c(m, neigten, 1))
+        dimnames(av.G.coord) <- list(Gnames, paste("E", 1:neigten, sep=""))
+        for (i in 1:neigten){
+                av.G.coord[,i,] <- apply((apply(Gs, 1:3, mean)) , 3, frobenius.prod, y = eTmat[,,i])
+        }
+        #Coordinates of the jth avG for the eigentensors of posterior mean S
+        MCMC.G.coord <- array(, c(m, neigten, MCMCsamp))
+        dimnames(MCMC.G.coord) <- list(Gnames, paste("E", 1:neigten, sep=""))
+        for (i in 1:neigten){
+                MCMC.G.coord[,i,] <- apply(Gs, 3:4, frobenius.prod, y = eTmat[,,i])
+        }
+        #Coordinates of the kth MCMC sample of the jth G for the eigentensors of posterior mean S
+        tensor.summary <- data.frame(rep(av.S.val,each=n), t(data.frame(eT.eigen)))
+        colnames(tensor.summary) <- c("S.eigval", "eT.val", traitnames)
+        rownames(tensor.summary)<- paste(paste("e", rep(1:neigten, each=n), sep=""), rep(1:n,neigten), sep=".")
+        list(tensor.summary = tensor.summary, av.S = av.S, eTmat = eTmat, av.G.coord = av.G.coord, MCMC.S = MCMC.S, MCMC.S.val = MCMC.S.val, MCMC.G.coord = MCMC.G.coord)
+}
+#END
+
+obj <- objects()
+
+# Observed tensor
+n = 5 # Number of traits
+m = 6 # Number of matrices
+MCMCsamp = 1000 # Number of MCMC samples
+Gnames <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spatial", "Temporal") # Treatment names
+traitnames <- c("Centroid","Line9-10","Angle789","Angle3104","Angle248")
+
+# Run the tensor for each assay temperature separately
+Ctens <- covtensor(G[,,1:6,])
+Htens <- covtensor(G[,,7:12,])
+
+# Summary of the tensor
+#round(Ctens$tensor.summary[1:5,],2)
+#round(Htens$tensor.summary[1:5,],2)
+
+# Save the tensor summaries in a nice format
+HPD <- cbind(c(Ctens$tensor.summary[c(1,6,11,16,21),1],Htens$tensor.summary[c(1,6,11,16,21),1]), t(apply(cbind(Ctens$MCMC.S.val[,1:5], Htens$MCMC.S.val[,1:5]), 2, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+HPD <- signif(HPD, digits=3)
+Seig <- paste(HPD[,1], " (", HPD[,2], ", ", HPD[,3], ")", sep="")
+
+C.sum <- data.frame(Assay="Cold", Proportion="", Seig="", Ctens$tensor.summary[1:25,])
+H.sum <- data.frame(Assay="Hot", Proportion="", Seig="", Htens$tensor.summary[1:25,])
+
+C.sum[c(1,6,11,16,21),2] <- round((colMeans(Ctens$MCMC.S.val) / mean(rowSums(Ctens$MCMC.S.val)))[1:5],2)
+H.sum[c(1,6,11,16,21),2] <- round((colMeans(Htens$MCMC.S.val) / mean(rowSums(Htens$MCMC.S.val)))[1:5],2)
+
+tens.summary <- rbind(C.sum, H.sum)
+
+tens.summary[c(1,6,11,16,21, 26,31,36,41,46),3] <- Seig
+tens.summary[,6:10] <- round(tens.summary[,6:10], 2)
+tens.summary[,5] <- round(tens.summary[,5], 3)
+
+write.csv(tens.summary, file="Table_tensor_summary.csv")
+
+```
+
+### Test for significant differences in G among treatments
+```{r Code to load and save randomised G-matrices, eval=FALSE}
+
+#### Only used the first time to construct null G
+#### Each randomisation has not been included in the supplementary material (due to large file size), use the code below only if randomisations have been conducted. Instead, the output array has been saved and included as an .Rdata file.
+
+nran <- 500 # Number of randomisations
+
+G_tensrdm <- array(,c(5,5,12,nran))
+
+for (i in 1:nran){
+  
+  # Load each randomisation from within the subfolder
+  load(paste("./Grdm_FOLDER/","rdm_", i, ".Rdata", sep=""))
+  
+  G_tensrdm[,,,i] <- arr
+  
+  rm(arr)
+  
+}
+
+save(G_tensrdm, file="G_Random_Tensor.Rdata")
+
+```
+
+```{r Covariance tensor on null G}
+
+# Covariance tensor on null G using Morrissey et al. (2019) approach
+
+# Load array containing the randomisations
+load("G_Random_Tensor.Rdata")
+
+# Separate cold and hot assay randomisations
+Gran_d <- G_tensrdm[,,1:6,]
+Gran_u <- G_tensrdm[,,7:12,]
+
+MCMCsamp = 500
+
+# Conduct covariance tensor on random models and graph observed versus random eigenvalues of S (the amount of difference in genetic variance described by the treatments)
+ran.tens.d <- covtensor(Gran_d)
+ran.tens.u <- covtensor(Gran_u)
+
+nnonzero <- min(n*(n+1)/2,m-1)
+
+dat.ran.d <- data.frame(Data="Random", Assay="Cold", ET=paste("E",1:5,sep=""), S=colMeans(ran.tens.d$MCMC.S.val[,1:5]), t(apply(ran.tens.d$MCMC.S.val[,1:5], 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+dat.ran.u <- data.frame(Data="Random", Assay="Hot", ET=paste("E",1:5,sep=""), S=colMeans(ran.tens.u$MCMC.S.val[,1:5]), t(apply(ran.tens.u$MCMC.S.val[,1:5], 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+dat.obs.d <- data.frame(Data="Observed", Assay="Cold", ET=paste("E",1:5,sep=""), S=colMeans(Ctens$MCMC.S.val[,1:5]), X1=NA, X2=NA)
+dat.obs.u <- data.frame(Data="Observed", Assay="Hot", ET=paste("E",1:5,sep=""), S=colMeans(Htens$MCMC.S.val[,1:5]), X1=NA, X2=NA)
+
+dat.S <- rbind(dat.ran.d, dat.ran.u, dat.obs.d, dat.obs.u)
+
+pd = position_dodge(width=0.3)
+
+pA <- ggplot(data=dat.S, aes(x=ET, y=S)) +
+        geom_errorbar(aes(group=Data, ymin=X1, ymax=X2), width=0.4, position=pd) +
+        geom_point(aes(group=Data, shape=Data, fill=Data), position=pd) +
+        scale_shape_manual(values=c(21,21)) +
+        scale_fill_manual(values=c("black","white")) +
+        labs(x="Eigentensor", y="Magnitude of difference in genetic variance\n (Eigenvalue of S)") +
+        facet_wrap(~Assay, ncol=2) +
+        theme_update(legend.position="none"); pA
+
+```
+
+### Which treatments contribute to differences in G within each assay?
+```{r Graph the coordinates}
+
+#### Use the coordinates to quantify the correlation between G for each treatment, and each eigentensor
+#### Coordinates capture how differences quantified by the eigentensors map to the original matrices
+Ccoord <- rbind(Ctens$MCMC.G.coord[,1,],Ctens$MCMC.G.coord[,2,],Ctens$MCMC.G.coord[,3,],Ctens$MCMC.G.coord[,4,],Ctens$MCMC.G.coord[,5,])
+Hcoord <- rbind(Htens$MCMC.G.coord[,1,],Htens$MCMC.G.coord[,2,],Htens$MCMC.G.coord[,3,],Htens$MCMC.G.coord[,4,],Htens$MCMC.G.coord[,5,])
+coord.all <- rbind(Ccoord, Hcoord)
+
+coords <- data.frame(ET=rep(rep(paste("E",1:5,sep=""),each=6),2), assay=rep(c("Cold","Hot"),each=30), treat=rep(Gnames,10), Coord=rowMeans(coord.all), t(apply(coord.all, 1, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+
+#### Coordinates for the replicate cages
+Coord.repG.d <- matrix(nrow=30, ncol=1000)
+Coord.repG.u <- matrix(nrow=30, ncol=1000)
+
+coldarray <- Garray[,,1:30,]
+hotarray <- Garray[,,31:60,]
+
+for (i in 1:1000){
+  for (j in 1:30){
+    Coord.repG.d[j,i] <- frobenius.prod(Ctens$eTmat[,,1], coldarray[,,j,i])
+    Coord.repG.u[j,i] <- frobenius.prod(Htens$eTmat[,,1], hotarray[,,j,i])
+  }
+}
+
+coord.repG2 <- rbind(Coord.repG.d, Coord.repG.u)
+
+coords.repG <- data.frame(Mat="Grep", assay=rep(c("Cold","Hot"),each=30), treat=rep(rep(Gnames,each=5),2), Coord=rowMeans(coord.repG2), t(apply(coord.repG2, 1, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+
+
+coords.repG$pos <- seq(1:nrow(coords.repG))
+coords$pos <- NA
+
+coords <- droplevels(coords[coords$ET %in% "E1",])
+
+pd=position_dodge(width=0.6)
+
+xlabs <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spat.", "Temp.")
+
+pB <- ggplot(data=coords.repG, aes(x=treat, y=Coord)) +
+        #geom_errorbar(data=coords.repG, aes(linetype=treat, colour=treat, group=pos, ymin=X1, ymax=X2), width=0.4, position=pd, alpha=0.2) +
+        geom_point(data=coords.repG, aes(colour=treat, group=pos), position=pd, alpha=0.2) +
+        geom_errorbar(data=coords, aes(linetype=treat, colour=treat, ymin=X1, ymax=X2), width=0.4) +
+        geom_point(data=coords, aes(shape=treat, colour=treat, fill=treat, size=treat)) +
+        labs(y="Coordinates") +
+        scale_shape_manual(values=c(20,20,21,21,23,24)) +
+        scale_linetype_manual(values=c("solid","solid","dashed","dashed","solid","solid")) +
+        scale_fill_manual(values=c("blue","red","white","white","grey","black")) +
+        scale_colour_manual(values=c("blue","red","blue","red","grey","black")) +
+        scale_size_manual(values=c(2.5,2.5,2,2,2,2)) +
+        facet_wrap(~assay, ncol=5) + 
+        scale_x_discrete(name="Treatment", labels = xlabs) +
+        theme_update(legend.position="none"); pB
+
+```
+
+## Part C - Does G change more across treatments or assays?
+```{r Conduct tensor analysis for all treatments AND both assays}
+
+obj <- c(obj, "pA", "pB")
+
+rm(list=setdiff(ls(), obj))
+
+obj <- objects()
+
+# Observed tensor
+n = 5
+m = 12 # This now includes 6 treatments x 2 assays
+MCMCsamp = 1000
+Gnames <- c("d_c","d_h","d_mc","d_mh","d_s","d_t", # d = cold assay
+            "u_c","u_h","u_mc","u_mh","u_s","u_t") # u = hot assay
+traitnames <- c("Centroid","Line9-10","Angle789","Angle3104","Angle248")
+
+# Run the tensor
+tens <- covtensor(G)
+
+#### Calculate and graph the coordinates
+coord.all <- rbind(tens$MCMC.G.coord[,1,],tens$MCMC.G.coord[,2,],tens$MCMC.G.coord[,3,],tens$MCMC.G.coord[,4,],tens$MCMC.G.coord[,5,])
+
+coords <- data.frame(ET=rep(paste("E",1:5,sep=""),each=12), assay=rep(rep(c("Cold","Hot"),each=6),5), treat=rep(Gnames,5), Coord=rowMeans(coord.all), t(apply(coord.all, 1, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+
+#### Coordinates for the replicate cages
+Coord.repG.d <- matrix(nrow=30, ncol=1000)
+Coord.repG.u <- matrix(nrow=30, ncol=1000)
+
+coldarray <- Garray[,,1:30,]
+hotarray <- Garray[,,31:60,]
+
+for (i in 1:1000){
+  for (j in 1:30){
+    Coord.repG.d[j,i] <- frobenius.prod(tens$eTmat[,,1], coldarray[,,j,i])
+    Coord.repG.u[j,i] <- frobenius.prod(tens$eTmat[,,1], hotarray[,,j,i])
+  }
+}
+
+coord.repG2 <- rbind(Coord.repG.d, Coord.repG.u)
+
+coords.repG <- data.frame(Mat="Grep", assay=rep(c("Cold","Hot"),each=30), treat=rep(Gnames,each=5), Coord=rowMeans(coord.repG2), t(apply(coord.repG2, 1, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+
+coords.repG$pos <- seq(1:nrow(coords.repG))
+coords$pos <- NA
+
+pd=position_dodge(width=0.6)
+pd2=position_dodge(width=0.2)
+
+pC <- ggplot(data=coords[coords$ET %in% "E1",], aes(x=assay, y=Coord)) +
+        #geom_errorbar(data=coords.repG, aes(linetype=treat, colour=treat, group=pos, ymin=X1, ymax=X2), width=0.4, position=pd, alpha=0.2) +
+        geom_point(data=coords.repG, aes(colour=treat, group=pos), position=pd, alpha=0.2) +
+        geom_errorbar(aes(linetype=treat, colour=treat, ymin=X1, ymax=X2), width=0.4, position=pd) +
+        geom_point(aes(shape=treat, colour=treat, fill=treat, size=treat), position=pd) +
+        labs(y="Coordinates",x="Treatment") +
+        scale_shape_manual(values=c(20,20,21,21,23,24, 20,20,21,21,23,24)) +
+        scale_linetype_manual(values=rep(rep(c("solid","dashed","solid"),each=2),2)) +
+        scale_fill_manual(values=rep(c("blue","red","white","white","grey","black"),2)) +
+        scale_colour_manual(values=rep(c("blue","red","blue","red","grey","black"),2)) +
+        scale_size_manual(values=c(2.5,2.5,2,2,2,2, 2.5,2.5,2,2,2,2)) +
+        labs(title="Assays combined") +
+        theme_update(legend.position="none")
+
+# Graph the output of the tensor analysis in three panels for the main text
+p1 <- grid.arrange(
+        pA,pB,pC,
+        layout_matrix = cbind(1,2,3),
+        widths=c(1.2,1.8,1.2),
+        ncol = 3)
+
+ggsave(plot = p1, height = 110, width = 300, dpi = 300, units = "mm", filename="Graph1_Tensor.pdf", useDingbats = FALSE)
+
+```
+
+# Test 2: Does environmental heterogeneity affect mean phenotype?
+```{r Test for differences in mean multivariate phenotype among treatments and across assays}
+
+rm(list=setdiff(ls(), obj))
+
+obj <- c("G", "M", "R", "Garray", "Marray", "Rarray")
+
+# Load data
+all <- read.csv("Data_foranimalmodel.csv", header=TRUE)
+
+# Focus on offspring generation
+dat.new <- droplevels(all[all$gen_code %in% c("m","f"),])
+
+# Save the univariate means
+write.csv(all %>% group_by(gen_code, assay, treatment) %>% summarise(across(colnames(all)[13:17], mean), .groups="keep"),"Table_Univariate_means.csv")
+
+#colnames(dat.new)
+dat.new$rep2 <- paste(dat.new$treatment, dat.new$replicate, sep="") # dummy variable for treatment:replicate
+
+# Mean scale the data
+dat.all <- dat.new
+mn.all <- colMeans(dat.all[,13:17])
+dat.all[,13:17] <- scale(dat.all[,13:17], center=FALSE, scale=mn.all) 
+
+# Dummy variable to include the correct error term in the MANOVA
+dat.all$replicate3 <- paste(dat.all$treatment, dat.all$assay, dat.all$replicate, sep="_")
+
+# MANOVA
+man1 <- manova(cbind(centroid, line9.10, angle7.8.9, angle3.10.4, angle2.4.8) ~ assay*treatment + Error(replicate3), data=dat.all)
+#summary(man1)
+
+m <- summary(man1, test = "Wilks")
+
+# Extract (and sum) the SSCP matrices for treatment, assay and treatment:assay
+H <- m$`Error: replicate3`$SS$treatment + m$`Error: replicate3`$SS$assay + m$`Error: replicate3`$SS$`assay:treatment`
+# Extract the error term SSCP
+E <- m$`Error: replicate3`$SS$Residual 
+
+# Replication calculated for an unbalanced design (as per Martin et al. 2008)
+f <- table(dat.all$replicate3)
+nf <- mean(f) - (1/11)*((mean(f^2)-(mean(f)^2))/mean(f))
+
+# Calculate D
+Dmatrix <- ((H / 11) - (E / 48)) / nf
+
+# Calculate scores for dmax and d2 (leading eigenvectors of D)
+dat.all$dmax <- t(eigen(Dmatrix)$vectors[,1] %*% t(dat.all[,13:17]))
+dat.all$d2 <- t(eigen(Dmatrix)$vectors[,2] %*% t(dat.all[,13:17]))
+
+# For graphing, calculate means for replicate cages and treatments
+by_rep <- group_by(dat.all, assay, treatment, replicate)
+rep.dat <- summarise(by_rep,
+                     dmax = mean(dmax),
+                     d2 = mean(d2), .groups="keep")
+
+by_all <- group_by(dat.all, assay, treatment)
+all.dat <- summarise(by_all,
+                     dmax.se = sd(dmax)/sqrt(length(dmax)),
+                     dmax = mean(dmax),
+                     d2.se = sd(d2)/sqrt(length(d2)),
+                     d2 = mean(d2), .groups="keep")
+
+p2 <- ggplot(data=rep.dat, aes(x=dmax, y=d2)) +
+        geom_point(aes(colour=treatment, shape=treatment), fill="white", alpha=0.4) + 
+        scale_colour_manual(values=c("blue","red","blue","red","grey","black")) +
+        scale_shape_manual(values=c(19,19,21,21,19,19)) +
+        geom_errorbar(data=all.dat, aes(ymin=d2-d2.se, ymax=d2+d2.se, colour=treatment)) +
+        geom_errorbarh(data=all.dat, aes(xmin=dmax-dmax.se, xmax=dmax+dmax.se, colour=treatment)) +
+        geom_point(data=all.dat, aes(colour=treatment, shape=treatment), fill="white", size=2) +
+        labs(x="dmax (98.2%)", y="d2 (1.8%)"); p2
+
+ggsave(plot = p2, height = 120, width = 130, dpi = 300, units = "mm", filename="Graph2_Dmatrix.pdf", useDingbats = FALSE)
+
+```
+
+# Test 3: Does genetic, maternal or environmental variance align with changes in mean phenotype?
+## Part A) Proportion of variance in the direction of phenotypic differences
+```{r Estimate vectors that represent evolved and plastic differences in mean phenotype}
+
+obj <- c(obj, "dat.new", "dat.all", "Dmatrix")
+
+rm(list=setdiff(ls(), obj))
+
+obj <- objects()
+
+#### Estimate D-matrices separately for hot and cold assays
+dat.cold <- droplevels(dat.new[dat.new$assay %in% "d",])
+mn.cold <- colMeans(dat.cold[,13:17])
+dat.cold[,13:17] <- scale(dat.cold[,13:17], center=FALSE, scale=mn.cold) 
+
+dat.hot <- droplevels(dat.new[dat.new$assay %in% "u",])
+mn.hot <- colMeans(dat.hot[,13:17])
+dat.hot[,13:17] <- scale(dat.hot[,13:17], center=FALSE, scale=mn.hot) 
+
+obj <- c(obj, "dat.cold", "dat.hot")
+
+# Cold D-matrix
+mC <- manova(cbind(centroid, line9.10, angle7.8.9, angle3.10.4, angle2.4.8) ~ treatment + Error(rep2), data=dat.cold)
+#summary(mC)
+
+mC <- summary(mC, test = "Wilks")
+
+HC <- mC$`Error: rep2`$SS$treatment
+EC <- mC$`Error: rep2`$SS$Residual 
+
+fC <- table(dat.cold$treatment)
+
+nfC <- mean(fC) - (1/5)*((mean(fC^2)-(mean(fC)^2))/mean(fC))
+
+dmat.C <- ((HC / 5) - (EC / 24)) / nfC
+
+# Hot D-matrix
+mH <- manova(cbind(centroid, line9.10, angle7.8.9, angle3.10.4, angle2.4.8) ~ treatment + Error(rep2), data=dat.hot)
+#summary(mH)
+
+mH <- summary(mH, test = "Wilks")
+
+HH <- mH$`Error: rep2`$SS$treatment
+EH <- mH$`Error: rep2`$SS$Residual 
+
+fH <- table(dat.hot$treatment)
+
+nfH <- mean(fH) - (1/5)*((mean(fH^2)-(mean(fH)^2))/mean(fH))
+
+dmat.H <- ((HH / 5) - (EH / 24)) / nfH
+
+write.csv(round(cbind(eigen(Dmatrix)$vectors[,1:2], 
+                      eigen(dmat.C)$vectors[,1],
+                      eigen(dmat.H)$vectors[,1]),2), "Table_Dmatrix_vectors.csv")
+
+obj <- c(obj, "dmat.H", "dmat.C")
+
+rm(list=setdiff(ls(), obj))
+
+obj <- objects()
+
+#### Estimate plasticity vectors (change across assays) for each treatment
+dat <- read.csv("Data_foranimalmodel.csv", header=T)
+dat <- droplevels(dat[dat$GEN %in% "offspring",])
+
+# Scale data
+mn <- colMeans(dat[,13:17])
+dat[,13:17] <- scale(dat[,13:17], center=FALSE, scale=mn)
+
+#names(dat)
+by_ass <- group_by(dat, treatment, assay)
+sum <- summarise(by_ass,
+                 centroid = mean(centroid),
+                 line9.10 = mean(line9.10),
+                 angle7.8.9 = mean(angle7.8.9),
+                 angle3.10.4 = mean(angle3.10.4),
+                 angle2.4.8 = mean(angle2.4.8), .groups="keep")
+
+sum3 <- data.frame(sum)
+sum2 <- paste(sum3[,1], sum3[,2],sep="")
+sum1 <- t(sum3[,3:7])
+colnames(sum1) <- sum2
+
+# Function to standardise vectors to unit length
+NV <- function(x){ x / (sqrt(sum(x^2))) }
+
+# Calculate plasticity across assays for each treatment
+xc <- NV(sum1[,1]-sum1[,2])
+xh <- NV(sum1[,3]-sum1[,4])
+xmc <- NV(sum1[,5]-sum1[,6])
+xmh <- NV(sum1[,7]-sum1[,8])
+xs <- NV(sum1[,9]-sum1[,10])
+xt <- NV(sum1[,11]-sum1[,12])
+
+plasvecs <- rbind(xc, xh, xmc, xmh, xs, xt)
+
+dmax.c <- eigen(dmat.C)$vectors[,1]
+dmax.h <- eigen(dmat.H)$vectors[,1]
+
+```
+
+```{r Quantify the proportion of variance in the direction of plasticity and evolved differences}
+
+## Vectors of plasticity (across assays) and evolved differences (among treatments) are projected through G, M and R
+## Below these projections are done for mean G (n=12 for each treatment in both assays) and then for all replicate cages (n=60)
+
+#### Projections for mean G (each treatment) ####
+# Duplicate  plasticity vectors so they match the number of matrices (for the 30 replicate G-matrices)
+multvecs <- data.table(plasvecs)[, lapply(.SD, function(x) rep(x,each=5))][, Time:=rep(1:5, each=nrow(plasvecs))]
+multvecs <- as.data.table(multvecs[,1:5])
+
+## G=genetic variances; M=Maternal variances, R=Residual variances
+plas.obs.g <- matrix(nrow=1000, ncol=12)
+evo.obs.g <- matrix(nrow=1000, ncol=12)
+gmax.obs.g <- matrix(nrow=1000, ncol=12)
+
+plas.obs.m <- matrix(nrow=1000, ncol=12)
+evo.obs.m <- matrix(nrow=1000, ncol=12)
+
+plas.obs.r <- matrix(nrow=1000, ncol=12)
+evo.obs.r <- matrix(nrow=1000, ncol=12)
+
+eG <- apply(apply(G, 1:3, mean), 3, function(x) eigen(x)$vectors[,1])
+
+# Project vectors for each treatment (n=6) at each MCMC sample
+## plasvecs = plasticity vectors across assay, dmax=evolved differences within assay
+for (i in 1:1000){
+  for (j in 1:6){
+    plas.obs.g[i,j] <- (t(as.numeric(plasvecs[j,])) %*% G[,,j,i] %*% as.numeric(plasvecs[j,])) / sum(diag(G[,,j,i]))
+    plas.obs.g[i,6+j] <- (t(as.numeric(plasvecs[j,])) %*% G[,,6+j,i] %*% as.numeric(plasvecs[j,])) / sum(diag(G[,,6+j,i]))
+
+    evo.obs.g[i,j] <- (t(as.numeric(dmax.c)) %*% G[,,j,i] %*% as.numeric(dmax.c)) / sum(diag(G[,,j,i]))
+    evo.obs.g[i,6+j] <- (t(as.numeric(dmax.h)) %*% G[,,6+j,i] %*% as.numeric(dmax.h)) / sum(diag(G[,,6+j,i]))
+
+    gmax.obs.g[i,j] <- (t(as.numeric(eG[,j])) %*% G[,,j,i] %*% as.numeric(eG[,j])) / sum(diag(G[,,j,i]))
+    gmax.obs.g[i,6+j] <- (t(as.numeric(eG[,6+j])) %*% G[,,6+j,i] %*% as.numeric(eG[,6+j])) / sum(diag(G[,,6+j,i]))
+    
+    plas.obs.m[i,j] <- (t(as.numeric(plasvecs[j,])) %*% M[,,j,i] %*% as.numeric(plasvecs[j,])) / sum(diag(M[,,j,i]))
+    plas.obs.m[i,6+j] <- (t(as.numeric(plasvecs[j,])) %*% M[,,6+j,i] %*% as.numeric(plasvecs[j,])) / sum(diag(M[,,6+j,i]))
+
+    evo.obs.m[i,j] <- (t(as.numeric(dmax.c)) %*% M[,,j,i] %*% as.numeric(dmax.c)) / sum(diag(M[,,j,i]))
+    evo.obs.m[i,6+j] <- (t(as.numeric(dmax.h)) %*% M[,,6+j,i] %*% as.numeric(dmax.h)) / sum(diag(M[,,6+j,i]))
+
+    plas.obs.r[i,j] <- (t(as.numeric(plasvecs[j,])) %*% R[,,j,i] %*% as.numeric(plasvecs[j,])) / sum(diag(R[,,j,i]))
+    plas.obs.r[i,6+j] <- (t(as.numeric(plasvecs[j,])) %*% R[,,6+j,i] %*% as.numeric(plasvecs[j,])) / sum(diag(R[,,6+j,i]))
+
+    evo.obs.r[i,j] <- (t(as.numeric(dmax.c)) %*% R[,,j,i] %*% as.numeric(dmax.c)) / sum(diag(R[,,j,i]))
+    evo.obs.r[i,6+j] <- (t(as.numeric(dmax.h)) %*% R[,,6+j,i] %*% as.numeric(dmax.h)) / sum(diag(R[,,6+j,i]))
+
+  }
+}
+
+treats <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spatial", "Temporal")
+
+dat.plas.G <- data.frame(Comp="Plasticity", Matrix="G", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(plas.obs.g), t(apply(plas.obs.g, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+dat.plas.M <- data.frame(Comp="Plasticity", Matrix="M", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(plas.obs.m), t(apply(plas.obs.m, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+dat.plas.R <- data.frame(Comp="Plasticity", Matrix="R", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(plas.obs.r), t(apply(plas.obs.r, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+dat.evol.G <- data.frame(Comp="Evolution", Matrix="G", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(evo.obs.g), t(apply(evo.obs.g, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+dat.evol.M <- data.frame(Comp="Evolution", Matrix="M", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(evo.obs.m), t(apply(evo.obs.m, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+dat.evol.R <- data.frame(Comp="Evolution", Matrix="R", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(evo.obs.r), t(apply(evo.obs.r, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+dat.gmax.G <- data.frame(Comp="agmax", Matrix="G", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(gmax.obs.g), t(apply(gmax.obs.g, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+vars <- rbind(dat.gmax.G, 
+              dat.plas.G, dat.plas.M, dat.plas.R, 
+              dat.evol.G, dat.evol.M, dat.evol.R)
+
+#### Projections for G estimated for each replicate cage ####
+# Separate arrays for hot and cold assays
+## G=genetic variances; M=Maternal variances, R=Residual variances
+Garray.d <- Garray[,,1:30,]
+Garray.u <- Garray[,,31:60,]
+Marray.d <- Marray[,,1:30,]
+Marray.u <- Marray[,,31:60,]
+Rarray.d <- Rarray[,,1:30,]
+Rarray.u <- Rarray[,,31:60,]
+
+evol.all.gmax.d <- matrix(nrow=1000, ncol=30)
+evol.all.gmax.u <- matrix(nrow=1000, ncol=30)
+multgmax.d <- data.table(t(eG[,1:6]))[, lapply(.SD, function(x) rep(x,each=5))][, Time:=rep(1:5, each=nrow(t(eG[,1:6])))]
+multgmax.d <- as.data.table(multgmax.d[,1:5])
+multgmax.u <- data.table(t(eG[,7:12]))[, lapply(.SD, function(x) rep(x,each=5))][, Time:=rep(1:5, each=nrow(t(eG[,7:12])))]
+multgmax.u <- as.data.table(multgmax.u[,1:5])
+
+plas.all.g.d <- matrix(nrow=1000, ncol=30)
+plas.all.m.d <- matrix(nrow=1000, ncol=30)
+plas.all.r.d <- matrix(nrow=1000, ncol=30)
+
+plas.all.g.u <- matrix(nrow=1000, ncol=30)
+plas.all.m.u <- matrix(nrow=1000, ncol=30)
+plas.all.r.u <- matrix(nrow=1000, ncol=30)
+
+evol.all.g.d <- matrix(nrow=1000, ncol=30)
+evol.all.m.d <- matrix(nrow=1000, ncol=30)
+evol.all.r.d <- matrix(nrow=1000, ncol=30)
+
+evol.all.g.u <- matrix(nrow=1000, ncol=30)
+evol.all.m.u <- matrix(nrow=1000, ncol=30)
+evol.all.r.u <- matrix(nrow=1000, ncol=30)
+
+for (i in 1:1000){
+        for (j in 1:30){
+        
+        evol.all.gmax.d[i,j] <- (t(as.numeric(multgmax.d[j,])) %*% Garray.d[,,j,i] %*% as.numeric(multgmax.d[j,])) / sum(diag(Garray.d[,,j,i]))
+        evol.all.gmax.u[i,j] <- (t(as.numeric(multgmax.u[j,])) %*% Garray.u[,,j,i] %*% as.numeric(multgmax.u[j,])) / sum(diag(Garray.u[,,j,i]))
+        
+        plas.all.g.d[i,j] <- (t(as.numeric(multvecs[j,])) %*% Garray.d[,,j,i] %*% as.numeric(multvecs[j,])) / sum(diag(Garray.d[,,j,i]))
+        plas.all.m.d[i,j] <- (t(as.numeric(multvecs[j,])) %*% Marray.d[,,j,i] %*% as.numeric(multvecs[j,])) / sum(diag(Marray.d[,,j,i]))
+        plas.all.r.d[i,j] <- (t(as.numeric(multvecs[j,])) %*% Rarray.d[,,j,i] %*% as.numeric(multvecs[j,])) / sum(diag(Rarray.d[,,j,i]))
+
+        plas.all.g.u[i,j] <- (t(as.numeric(multvecs[j,])) %*% Garray.u[,,j,i] %*% as.numeric(multvecs[j,])) / sum(diag(Garray.u[,,j,i]))
+        plas.all.m.u[i,j] <- (t(as.numeric(multvecs[j,])) %*% Marray.u[,,j,i] %*% as.numeric(multvecs[j,])) / sum(diag(Marray.u[,,j,i]))
+        plas.all.r.u[i,j] <- (t(as.numeric(multvecs[j,])) %*% Rarray.u[,,j,i] %*% as.numeric(multvecs[j,])) / sum(diag(Rarray.u[,,j,i]))
+        
+        evol.all.g.d[i,j] <- (t(dmax.c) %*% Garray.d[,,j,i] %*% dmax.c) / sum(diag(Garray.d[,,j,i]))
+        evol.all.m.d[i,j] <- (t(dmax.c) %*% Marray.d[,,j,i] %*% dmax.c) / sum(diag(Marray.d[,,j,i]))
+        evol.all.r.d[i,j] <- (t(dmax.c) %*% Rarray.d[,,j,i] %*% dmax.c) / sum(diag(Rarray.d[,,j,i]))
+
+        evol.all.g.u[i,j] <- (t(dmax.h) %*% Garray.u[,,j,i] %*% dmax.h) / sum(diag(Garray.u[,,j,i]))
+        evol.all.m.u[i,j] <- (t(dmax.h) %*% Marray.u[,,j,i] %*% dmax.h) / sum(diag(Marray.u[,,j,i]))
+        evol.all.r.u[i,j] <- (t(dmax.h) %*% Rarray.u[,,j,i] %*% dmax.h) / sum(diag(Rarray.u[,,j,i]))
+                
+        }
+}
+
+#### Organise dataframes and graph ####
+reps.evol.gmax <- data.frame(Comp="agmax", Matrix="G", Ass=rep(c("Cold assay","Hot assay"),each=30), treat=rep(treats,2), proj=colMeans(cbind(evol.all.gmax.d, evol.all.gmax.u)), t(apply(cbind(evol.all.gmax.d, evol.all.gmax.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+reps.plas.G <- data.frame(Comp="Plasticity", Matrix="G", Ass=rep(c("Cold assay","Hot assay"),each=30), treat=rep(treats,2), proj=colMeans(cbind(plas.all.g.d, plas.all.g.u)), t(apply(cbind(plas.all.g.d, plas.all.g.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+reps.plas.M <- data.frame(Comp="Plasticity", Matrix="M", Ass=rep(c("Cold assay","Hot assay"),each=30), treat=rep(treats,2), proj=colMeans(cbind(plas.all.m.d, plas.all.m.u)), t(apply(cbind(plas.all.m.d, plas.all.m.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+reps.plas.R <- data.frame(Comp="Plasticity", Matrix="R", Ass=rep(c("Cold assay","Hot assay"),each=30), treat=rep(treats,2), proj=colMeans(cbind(plas.all.r.d, plas.all.r.u)), t(apply(cbind(plas.all.r.d, plas.all.r.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+reps.evol.G <- data.frame(Comp="Evolution", Matrix="G", Ass=rep(c("Cold assay","Hot assay"),each=30), treat=rep(treats,2), proj=colMeans(cbind(evol.all.g.d, evol.all.g.u)), t(apply(cbind(evol.all.g.d, evol.all.g.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+reps.evol.M <- data.frame(Comp="Evolution", Matrix="M", Ass=rep(c("Cold assay","Hot assay"),each=30), treat=rep(treats,2), proj=colMeans(cbind(evol.all.m.d, evol.all.m.u)), t(apply(cbind(evol.all.m.d, evol.all.m.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+reps.evol.R <- data.frame(Comp="Evolution", Matrix="R", Ass=rep(c("Cold assay","Hot assay"),each=30), treat=rep(treats,2), proj=colMeans(cbind(evol.all.r.d, evol.all.r.u)), t(apply(cbind(evol.all.r.d, evol.all.r.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+repvars <- rbind(reps.evol.gmax,
+                 reps.plas.G, reps.plas.M, reps.plas.R,
+                 reps.evol.G, reps.evol.M, reps.evol.R)
+
+repvars$MatID <- seq(1:nrow(repvars))
+
+
+pd <- position_dodge(width=0.7)
+
+p3a <- ggplot(data=repvars, aes(x=Comp, y=proj)) +
+        #geom_errorbar(data=repvars, aes(ymin=X1, ymax=X2), width=0, position=pd, alpha=0.2) +
+        geom_point(data=repvars, aes(shape=treat, colour=treat, fill=treat, size=treat), position=pd, alpha=0.2) +
+        geom_errorbar(data=vars, aes(linetype=treat, colour=treat, ymin=X1, ymax=X2), width=0.15, position=pd) +
+        geom_point(data=vars, aes(shape=treat, colour=treat, fill=treat, size=treat), position=pd) +
+        scale_shape_manual(values=c(20,20,21,21,23,24, 20,20,21,21,23,24)) +
+        scale_linetype_manual(values=rep(rep(c("solid","dashed","solid"),each=2),2)) +
+        scale_fill_manual(values=rep(c("blue","red","white","white","grey","black"),2)) +
+        scale_colour_manual(values=rep(c("blue","red","blue","red","grey","black"),2)) +
+        scale_size_manual(values=c(2.5,2.5,2,2,2,2, 2.5,2.5,2,2,2,2)) +
+        labs(y="Proportion of variance", x="Phenotype vector") +
+        theme_update(legend.position="bottom") +
+        #coord_cartesian(ylim=c(0,1)) +
+        facet_wrap(Ass~Matrix, ncol=3, scales="free_x"); p3a
+
+ggsave(plot = p3a, height = 190, width = 180, dpi = 300, units = "mm", filename="Graph3a_GMRprojection.pdf", useDingbats = FALSE)
+
+```
+
+## Part B) Random projections
+```{r}
+
+# Number of random vectors to project through G
+nrdmvecs <- 1000
+
+proj.ran <- matrix(nrow=nrdmvecs, ncol=12)
+
+# Function to normalise the vectors
+NV <- function(x){ x / (sqrt(sum(x^2))) }
+
+# project for mean G (n=12; 6 treatmens in 2 assays)
+for (j in 1:nrdmvecs){
+  for (i in 1:12){ 
+    
+    vec.rdm <- NV(runif(5, min = -1, max = 1))
+    
+    proj.ran[j,i] <- t(vec.rdm) %*% G[,,i,j] %*% vec.rdm / sum(diag(G[,,i,j]))
+    
+    rm(vec.rdm)
+    
+  }
+}
+
+# Observed data frame (without gmax)
+obs.dat <- droplevels(vars[vars$Mat %in% "G" & !(vars$Comp %in% "agmax"),])
+
+# Randomised data frames
+ran.dat.evo <- data.frame(Comp="Evolution", Matrix="G", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(proj.ran), t(apply(proj.ran, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+ran.dat.pla <- data.frame(Comp="Plasticity", Matrix="G", Ass=rep(c("Cold assay","Hot assay"),each=6), treat=rep(treats,2), proj=colMeans(proj.ran), t(apply(proj.ran, 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+dat.ran <- rbind(ran.dat.pla, ran.dat.evo)
+
+dat.ran$Data <- "Random"
+obs.dat$Data <- "Observed"
+
+dat.all <- rbind(dat.ran, obs.dat)
+
+xlabs <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spatial", "Temporal")
+pd <- position_dodge(width=0.3)
+
+p3b <- ggplot(data=dat.all, aes(x=treat, y=proj)) +
+  geom_errorbar(aes(ymin=X1, ymax=X2, colour=Data), width=0.3, position=pd) +
+  geom_point(aes(colour=Data), position=pd) +
+  labs(y="Proportion of genetic variance", x="Treatment") +
+  scale_colour_manual(values=c("black", "grey")) +
+  facet_wrap(Ass~Comp, ncol=2); p3b
+
+ggsave(plot = p3b, height = 170, width = 180, dpi = 300, units = "mm", filename="Graph3b_null.pdf", useDingbats = FALSE)
+
+```
+
+
+# Test 4: Does phenotypic evolution occur along genetic lines of least resistance?
+
+## Part A - Compare gmax with phenotypic divergence
+```{r Compare angles between vectors of G and vectors representing differences in mean phenotype}
+
+# Angles are compared for mean G and for all replicate cages
+
+obj <- c(obj, "G_rdm", "Gu.rdm", "Gd.rdm", "vec.rdm", "plasvecs")
+
+rm(list=setdiff(ls(), obj))
+
+obj <- objects()
+
+# Function for calculating angle between two vectors
+ang <- function(x,y) { acos(abs(frobenius.prod(x, y))) * (180/pi) }
+
+treats <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spatial", "Temporal")
+
+Gd2 <- apply(Garray[,,1:30,], 1:3, mean)
+Gu2 <- apply(Garray[,,31:60,], 1:3, mean)
+
+# Each array is of the form nxnxCxT (where C=the replicate cages; T=the treatment)
+Gd3 <- array(,c(5,5,5,6))
+Gu3 <- array(,c(5,5,5,6))
+Gd3[,,,1] <- Gd2[,,1:5]
+Gd3[,,,2] <- Gd2[,,6:10]
+Gd3[,,,3] <- Gd2[,,11:15]
+Gd3[,,,4] <- Gd2[,,16:20]
+Gd3[,,,5] <- Gd2[,,21:25]
+Gd3[,,,6] <- Gd2[,,26:30]
+
+Gu3[,,,1] <- Gu2[,,1:5]
+Gu3[,,,2] <- Gu2[,,6:10]
+Gu3[,,,3] <- Gu2[,,11:15]
+Gu3[,,,4] <- Gu2[,,16:20]
+Gu3[,,,5] <- Gu2[,,21:25]
+Gu3[,,,6] <- Gu2[,,26:30]
+
+mnG.d <- G[,,1:6,]
+mnG.u <- G[,,7:12,]
+
+mnG.evo.d <- matrix(nrow=1000, ncol=6)
+mnG.evo.u <- matrix(nrow=1000, ncol=6)
+mnG.plas.d <- matrix(nrow=1000, ncol=6)
+mnG.plas.u <- matrix(nrow=1000, ncol=6)
+
+cgvecs.all <- matrix(nrow=6, ncol=5)
+hgvecs.all <- matrix(nrow=6, ncol=5)
+
+cgplasvecs.all <- matrix(nrow=6, ncol=5)
+hgplasvecs.all <- matrix(nrow=6, ncol=5)
+
+# plasvecs=vectors of plasticity across assays; dmat=evolved differences among treatments
+for (i in 1:6){ # treatment
+  for (j in 1:5){ # cages within treatment
+      for (k in 1:1000){ # MCMCsample
+        mnG.evo.d[k,i] <- ang(eigen(mnG.d[,,i,k])$vectors[,1], eigen(dmat.C)$vectors[,1])
+        mnG.evo.u[k,i] <- ang(eigen(mnG.u[,,i,k])$vectors[,1], eigen(dmat.H)$vectors[,1])
+        mnG.plas.d[k,i] <- ang(eigen(mnG.d[,,i,k])$vectors[,1], plasvecs[i,])
+        mnG.plas.u[k,i] <- ang(eigen(mnG.u[,,i,k])$vectors[,1], plasvecs[i,])
+      }
+        # This is for the mean of the treatment (mean of all MCMC samples)
+        cgvecs.all[i,j] <- ang(eigen(Gd3[,,j,i])$vectors[,1], eigen(dmat.C)$vectors[,1])
+        hgvecs.all[i,j] <- ang(eigen(Gu3[,,j,i])$vectors[,1], eigen(dmat.H)$vectors[,1])
+
+        cgplasvecs.all[i,j] <- ang(eigen(Gd3[,,j,i])$vectors[,1], plasvecs[i,])
+        hgplasvecs.all[i,j] <- ang(eigen(Gu3[,,j,i])$vectors[,1], plasvecs[i,])
+  }
+}
+
+vecs <- data.frame(Assay=rep(c("C","H"),each=6), Treatment=rep(treats,2), Anglegmaxd2=round(c(mnG.evo.d, mnG.evo.u),1), round(rbind(cgvecs.all, hgvecs.all),1))
+
+#### Angles between random vectors (for comparing to null expectation)
+nran = 100000
+
+NV <- function(x){ x / (sqrt(sum(x^2))) }
+
+rdm.vec.cor <- vector()
+
+for (j in 1:nran){
+  
+      rdm.gvec <- NV(runif(5, min = -1, max = 1))
+      rdm.dvec <- NV(runif(5, min = -1, max = 1))
+                
+      rdm.vec.cor[j] <- ang(rdm.gvec, rdm.dvec)
+        
+}
+
+# Construct dataframes and graph
+dat.obs.mnG.evo <- data.frame(Type="1.Evolution", data="Observed", assay=rep(c("Cold","Hot"),each=6), Treatment=rep(treats,2), Angle=colMeans(cbind(mnG.evo.d, mnG.evo.u)), t(apply(cbind(mnG.evo.d, mnG.evo.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+dat.obs.mnG.pla <- data.frame(Type="2.Plasticity", data="Observed", assay=rep(c("Cold","Hot"),each=6), Treatment=rep(treats,2), Angle=colMeans(cbind(mnG.plas.d, mnG.plas.u)), t(apply(cbind(mnG.plas.d, mnG.plas.u), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+dat.alig.obs.mnG <- rbind(dat.obs.mnG.evo, dat.obs.mnG.pla)
+
+dat.obs.all.evo <- data.frame(Type="1.Evolution", data="Observed", assay=rep(c("Cold","Hot"),each=30), Treatment=rep(rep(treats,each=5),2), Angle=c(c(cgvecs.all), c(hgvecs.all)), X1=NA, X2=NA)
+dat.obs.all.pla <- data.frame(Type="2.Plasticity", data="Observed", assay=rep(c("Cold","Hot"),each=30), Treatment=rep(rep(treats,each=5),2), Angle=c(c(cgplasvecs.all), c(hgplasvecs.all)), X1=NA, X2=NA)
+
+dat.allig.obs.all <- rbind(dat.obs.all.evo, dat.obs.all.pla)
+write.csv(dat.allig.obs.all, "Table_alignment_allreps.csv")
+
+dat.ran.evo <- data.frame(Type="1.Evolution", data="Random", assay=rep(c("Cold","Hot"),each=6), Treatment=rep(treats,2), Angle=colMeans(cbind(rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor)), t(apply(cbind(rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+dat.ran.pla <- data.frame(Type="2.Plasticity", data="Random", assay=rep(c("Cold","Hot"),each=6), Treatment=rep(treats,2), Angle=colMeans(cbind(rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor)), t(apply(cbind(rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor, rdm.vec.cor), 2, function(x) HPDinterval(as.mcmc(x),prob=0.9))))
+
+dat.alig.rand <- rbind(dat.ran.evo, dat.ran.pla)
+
+xlabs <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spat.", "Temp.")
+
+p4 <- ggplot(data=dat.alig.obs.mnG, aes(x=Treatment, y=Angle)) +
+        # Random alignment
+        geom_errorbar(data=dat.alig.rand, aes(ymin=X1, ymax=X2), width=0.35, colour="gray", position=position_nudge(x=0.1)) +
+        geom_point(data=dat.alig.rand, colour="gray", position=position_nudge(x=0.1)) +
+
+        # Average G
+        geom_errorbar(data=dat.alig.obs.mnG, aes(colour=Treatment, linetype=Treatment, ymin=X1, ymax=X2), width=0.35, position=position_nudge(x=-0.1)) +
+        geom_point(data=dat.alig.obs.mnG, aes(shape=Treatment, colour=Treatment, size=Treatment, fill=Treatment), size=3, position=position_nudge(x=-0.1)) +
+        
+        # Replicate cages
+        geom_point(data=dat.allig.obs.all, aes(shape=Treatment, colour=Treatment, size=Treatment, fill=Treatment), size=2, alpha=0.3, position=position_nudge(x=-0.1)) +
+  
+        coord_cartesian(ylim=c(0,90)) +
+        scale_shape_manual(values=c(19,19,21,21,23,24, 19,19,21,21,23,24)) +
+        scale_linetype_manual(values=rep(c("solid","dashed","solid"),each=2)) +
+        #scale_linetype_manual(values=rep(rep(c("solid","dashed","solid"),each=2),2)) +
+        scale_fill_manual(values=rep(c("blue","red","white","white","grey","black"),2)) +
+        scale_colour_manual(values=rep(c("blue","red","blue","red","grey","black"),2)) +
+        labs(x="Treatment", y="Angle between gmax and vectors representing \n evolved and plastic changes in phenotype") +
+        facet_wrap(assay ~ Type, ncol=2)
+
+ggsave(plot = p4, height = 200, width = 160, dpi = 300, units = "mm", filename="Graph4_Angles.pdf", useDingbats = FALSE)
+
+p4
+
+```
+
+### Estimate angles between vectors of G
+```{r, eval=FALSE, include=FALSE}
+
+#### gmax correlations across treatments
+Gd <- G[,,1:6,]
+Gu <- G[,,7:12,]
+
+# Create grid to compare G for all pairwise comparisons
+x=seq(1,6); y=seq(1:6)
+ref <- expand.grid(x=x, y=y)
+
+gmaxcorC <- matrix(nrow=6, ncol=6)
+gmaxcorH <- matrix(nrow=6, ncol=6)
+g2corC <- matrix(nrow=6, ncol=6)
+g2corH <- matrix(nrow=6, ncol=6)
+for (i in 1:nrow(ref)){
+  
+  gmaxcorC[ref[i,1],ref[i,2]] <- ang(eigen(apply(Gd[,,ref[i,1],], 1:2, mean))$vectors[,1], 
+                                     eigen(apply(Gd[,,ref[i,2],], 1:2, mean))$vectors[,1])
+  gmaxcorH[ref[i,1],ref[i,2]] <- ang(eigen(apply(Gu[,,ref[i,1],], 1:2, mean))$vectors[,1], 
+                                     eigen(apply(Gu[,,ref[i,2],], 1:2, mean))$vectors[,1])
+
+  g2corC[ref[i,1],ref[i,2]] <- ang(eigen(apply(Gd[,,ref[i,1],], 1:2, mean))$vectors[,2], 
+                                   eigen(apply(Gd[,,ref[i,2],], 1:2, mean))$vectors[,2])
+  g2corH[ref[i,1],ref[i,2]] <- ang(eigen(apply(Gu[,,ref[i,1],], 1:2, mean))$vectors[,2], 
+                                   eigen(apply(Gu[,,ref[i,2],], 1:2, mean))$vectors[,2])
+  
+}
+
+lowerTriangle(gmaxcorC) <- lowerTriangle(g2corC)
+lowerTriangle(gmaxcorH) <- lowerTriangle(g2corH)
+
+gmaxcorC <- round(gmaxcorC, 1)
+gmaxcorH <- round(gmaxcorH, 1)
+
+diag(gmaxcorC) <- ""
+diag(gmaxcorH) <- ""
+
+write.csv(cbind(rbind(gmaxcorC, gmaxcorH), vecs), "Table_VectorCor_gmax-dmax.csv")
+
+```
+
+## Part B - Does the conserved element of G (similar parts of G) align with divergence?
+```{r Krzanowski common subspace analysis}
+
+rm(list=setdiff(ls(), c("Garray", "G", "dmat.C", "dmat.H")))
+
+# Analsis is conducted for mean G, and the all replicate cages
+
+# Krzanowski's subspace analysis from Aguirre et al. (2014)
+#START
+kr.subspace <- function(Gs, vec){
+  if (dim(Gs)[[1]] != dim(Gs)[[2]]){
+    stop("G array must be of order n x n x m x MCMCsamp")
+  }
+  if (is.na(dim(Gs)[4])) {
+    stop("There are no MCMCsamples")
+  }
+  n <- dim(Gs)[[1]]
+  m <- dim(Gs)[[3]]
+  MCMCsamp <- dim(Gs)[[4]] 
+  if(length(vec) != m){stop("vec must have length = m")}
+  h <- function (g, v){
+    AA <- array(, c(n, n, m))  
+    for (k in 1:m){
+      g.vec <- eigen(g[,,k])$vectors[,1:(v[k])] 
+      AA[,,k] <- g.vec %*% t(g.vec)
+    }
+    H <- apply(AA, 1:2, sum)
+    list(H = H, AA = AA)
+  }
+  #internal function to calculate AA and H
+  MCMC.H <- array(, c(n, n, MCMCsamp))
+  dimnames(MCMC.H) <- list(dimnames(Gs)[[1]], dimnames(Gs)[[1]], dimnames(Gs)[[4]])      
+  MCMC.AA <- array(, c(n, n, m, MCMCsamp))
+  dimnames(MCMC.AA) <- list(dimnames(Gs)[[1]], dimnames(Gs)[[1]], dimnames(Gs)[[3]], dimnames(Gs)[[4]])
+   for (i in 1:MCMCsamp){
+     kr <- h(Gs[,,,i], v = vec)
+     MCMC.H[,,i] <- kr$H
+     MCMC.AA[,,,i] <- kr$AA
+   }	
+   #calculate AA and H for the ith MCMC sample of the G array		
+   avH <- apply(MCMC.H, 1:2, mean)
+   rownames(avH) <- dimnames(Gs)[[1]]
+   colnames(avH) <- dimnames(Gs)[[1]]
+   #calculate the posterior mean H
+   avAA <- apply(MCMC.AA, 1:3, mean)
+   dimnames(avAA) <- list(dimnames(Gs)[[1]], dimnames(Gs)[[1]], dimnames(Gs)[[3]])
+   #calculate the posterior mean AA
+   avH.vec <- eigen(avH)$vectors
+   #eigenanalysis of posterior mean H	
+   proj<- function(a, b) t(b) %*% a %*% b
+   #internal function to do projection
+   avH.theta <- matrix(, n, m)
+    for (i in 1:n){
+     for (i in 1:n){
+      avH.theta[i,] <- acos(sqrt(apply(avAA, 3, proj, b = avH.vec[,i]))) * (180/pi)
+     }
+    }
+    #angles between the eigenvectors posterior mean H and the posterior mean subspaces of each population
+    MCMC.H.val <- matrix(, MCMCsamp, n)
+    colnames(MCMC.H.val) <- paste("h", 1:n, sep="")
+     for (i in 1:n){
+      MCMC.H.val[,i] <- apply(MCMC.H, 3, proj, b = avH.vec[,i])
+     }
+     #posterior distribution of the genetic variance for the eigenvectors of posterior mean H 
+     MCMC.H.theta <- array(, c(n, m, MCMCsamp))
+     rownames(MCMC.H.theta) <- paste("h", 1:n, sep="")
+     colnames(MCMC.H.theta) <- dimnames(Gs)[[3]]
+      for(i in 1:n){
+       for(j in 1:MCMCsamp){
+         MCMC.H.theta[i,,j] <- acos(sqrt(apply(MCMC.AA[,,,j], 3, proj, b = avH.vec[,i]))) * (180/pi)
+      }
+     }
+     #posterior distribution of the angles between the eigenvectors of posterior mean H and the MCMC samples of the subspaces of each population
+  list(avAA = avAA, avH = avH, MCMC.AA = MCMC.AA, MCMC.H = MCMC.H, MCMC.H.val = MCMC.H.val, MCMC.H.theta = MCMC.H.theta)
+}
+#END
+
+# Subspace analysis on mean G
+kr.c <- kr.subspace(G[,,1:6,], vec=rep(2,6))
+kr.h <- kr.subspace(G[,,7:12,], vec=rep(2,6))
+
+# Does h1 describe a large amount of genetic variance?
+## Project h1 through observed G
+hgmat <- matrix(nrow=1000, ncol=12)
+for (i in 1:6){
+  for (j in 1:1000){
+    hgmat[j,i] <- t(eigen(kr.c$avH)$vectors[,1]) %*% Garray[,,i,j] %*% eigen(kr.c$avH)$vectors[,1] / sum(diag(Garray[,,i,j]))
+    hgmat[j,6+i] <- t(eigen(kr.h$avH)$vectors[,1]) %*% Garray[,,6+i,j] %*% eigen(kr.h$avH)$vectors[,1] / sum(diag(Garray[,,6+i,j]))
+  }
+}
+
+# colMeans(hgmat)
+
+# Function to calculate angle between the leading eigenvectors of 2 matrices
+ang <- function(x,y) { acos(abs(frobenius.prod(eigen(x)$vectors[,1], eigen(y)$vectors[,1]))) * (180/pi) }
+
+# Conduct the subspace analysis on all replicate cages
+kr.c2 <- kr.subspace(Garray[,,1:30,], vec=rep(2,30))
+kr.h2 <- kr.subspace(Garray[,,31:60,], vec=rep(2,30))
+
+## Save summary table for Krzanowski's subspace analysis
+kr.hval <- round(c(colMeans(kr.c$MCMC.H.val), colMeans(kr.h$MCMC.H.val)), 2)
+kr.hval2 <- round(c(colMeans(kr.c2$MCMC.H.val), colMeans(kr.h2$MCMC.H.val)), 2)
+
+kr.hint <- paste(round(apply(cbind(kr.c$MCMC.H.val, kr.h$MCMC.H.val), 2, function(x) HPDinterval(as.mcmc(x), propb=0.9)[1]),2), round(apply(cbind(kr.c$MCMC.H.val, kr.h$MCMC.H.val), 2, function(x) HPDinterval(as.mcmc(x), propb=0.9)[2]),2), sep=", ")
+kr.hint2 <- paste(round(apply(cbind(kr.c2$MCMC.H.val, kr.h2$MCMC.H.val), 2, function(x) HPDinterval(as.mcmc(x), propb=0.9)[1]),2), round(apply(cbind(kr.c2$MCMC.H.val, kr.h2$MCMC.H.val), 2, function(x) HPDinterval(as.mcmc(x), propb=0.9)[2]),2), sep=", ")
+
+kr.hvec <- round(cbind(eigen(kr.c$avH)$vectors, eigen(kr.h$avH)$vectors), 2)
+kr.hvec2 <- round(cbind(eigen(kr.c2$avH)$vectors, eigen(kr.h2$avH)$vectors), 2)
+
+treats <- c("Hom.\ncold", "Hom.\nhot", "Mig.\ncold", "Mig.\nhot", "Spatial", "Temporal")
+kr.ang <- round(cbind(t(apply(kr.c$MCMC.H.theta, 1:2, mean)), t(apply(kr.h$MCMC.H.theta, 1:2, mean))), 2)
+kr.ang2 <- round(cbind(t(apply(kr.c2$MCMC.H.theta, 1:2, mean)), t(apply(kr.h2$MCMC.H.theta, 1:2, mean))), 2)
+
+row.names(kr.ang) <- treats
+row.names(kr.ang2) <- paste(rep(treats, each=5), 1:5, sep="")
+
+kr.all <- rbind(kr.hval, kr.hint, kr.hvec, kr.ang)
+kr.all2 <- rbind(kr.hval2, kr.hint2, kr.hvec2, kr.ang2)
+
+kr.comb <- rbind(kr.all, kr.all2)
+
+write.csv(kr.comb, "Krzanowski_all.csv")
+
+# Calculate observed angles between subspace and evolved differences among treatments
+obs.kr.c <- apply(kr.c$MCMC.H, 3, function(x) ang(x, dmat.C))
+obs.kr.h <- apply(kr.h$MCMC.H, 3, function(x) ang(x, dmat.H))
+
+obs.reps.kr.c <- apply(kr.c2$MCMC.H, 3, function(x) ang(x, dmat.C))
+obs.reps.kr.h <- apply(kr.h2$MCMC.H, 3, function(x) ang(x, dmat.H))
+
+obs.dat.mn <- data.frame(data="Observed", Matrices="Mean G", Ass=c("Cold","Hot"), ang=c(ang(kr.c$avH, dmat.C),ang(kr.h$avH, dmat.H)), t(apply(cbind(obs.kr.c, obs.kr.h), 2, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+obs.dat.rep <- data.frame(data="Observed", Matrices="Replicate G", Ass=c("Cold","Hot"), ang=c(ang(kr.c2$avH, dmat.C),ang(kr.h2$avH, dmat.H)), t(apply(cbind(obs.reps.kr.c, obs.reps.kr.h), 2, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+
+# Calculate random expectation
+
+# Function for calculating angle between 2 vectors
+ang <- function(x,y) { acos(abs(frobenius.prod(x, y))) * (180/pi) }
+
+# Function for normalising vectors
+NV <- function(x){ x / (sqrt(sum(x^2))) }
+
+# Number of random vectors
+nran = 100000
+
+rdm.vec.cor <- vector()
+
+for (j in 1:nran){
+  
+      rdm.vec.g <- NV(runif(5, min = -1, max = 1))
+      rdm.vec.d <- NV(runif(5, min = -1, max = 1))
+      rdm.vec.cor[j] <- ang(rdm.vec.g, rdm.vec.d)
+      
+      rm(rdm.vec.g, rdm.vec.d)
+      
+}
+
+# Construct data frames and graph
+ran.dat.mn <- data.frame(data="Random", Matrices="Mean G", Ass=c("Cold","Hot"), ang=colMeans(cbind(rdm.vec.cor,rdm.vec.cor)), t(apply(cbind(rdm.vec.cor,rdm.vec.cor), 2, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+ran.dat.rep <- data.frame(data="Random", Matrices="Replicate G", Ass=c("Cold","Hot"), ang=colMeans(cbind(rdm.vec.cor,rdm.vec.cor)), t(apply(cbind(rdm.vec.cor,rdm.vec.cor), 2, function(x) HPDinterval(as.mcmc(x), prob=0.9))))
+
+dat.all <-rbind(obs.dat.mn, obs.dat.rep, ran.dat.mn, ran.dat.rep)
+
+pd = position_dodge(width=0.3)
+
+p5 <- ggplot(dat.all, aes(x=Matrices, y=ang)) +
+  geom_errorbar(aes(ymin=X1, ymax=X2, colour=data), width=0.3, position=pd) +
+  geom_point(data=dat.all, aes(colour=data), position=pd) +
+  facet_wrap(~Ass, ncol=2) +
+  scale_colour_manual(values=c("black","grey")) +
+  labs(y="Angle between subspace and phenotypic divergence") +
+  coord_cartesian(ylim=c(0,90))
+
+ggsave(plot = p5, height = 110, width = 120, dpi = 300, units = "mm", filename="Graph5_KrzAngles.pdf", useDingbats = FALSE)
+
+p5
+
+```
+
+# Supplementary code 1: Construct data for the null distribution of differences among G - as per Morrissey et al. 2019
+```{r, eval = FALSE}
+
+## For a simple version, see Appendix containing the simulations of Null G
+
+#### calculate the Fixed effects ####
+# Add the means (of the fixed effects) from the raw data
+dat <- read.csv('Data_foranimalmodel.csv', header=TRUE)
+names(dat)
+
+dat$mat <- paste(dat$assay, dat$treatment, sep="_")
+
+listmat <- unique(dat$mat)
+listmat <- listmat[order(listmat, decreasing=F)]
+
+newdat <- list()
+mnfx <- list()
+
+for (i in 1:12){
+  
+  dat.tmp <- subset(dat, mat==listmat[i])
+  
+  mn <- colMeans(dat.tmp[,13:17])
+  dat.tmp[,13:17] <- scale(dat.tmp[,13:17], center=FALSE, scale=mn)
+  
+  newdat[[i]] <- dat.tmp
+  
+  mnfx[[i]] <- dat.tmp %>% group_by(gen_code) %>% summarise(across(colnames(dat.tmp)[13:17], mean))
+  
+  rm(dat.tmp)
+  
+}
+
+####  Reshape MCMCsamples into Gmatrices & construct random effects ####
+
+#number of MCMC samples
+MCMCsamp <- 500
+#number of traits 
+n <- 5
+#number of matrices to compare
+m <- 12
+#number of random effects specified in the model. In our analyses these were id, dam and replicate
+rfx <- 3
+#dimension of the residual
+# Is it a diagonal matrix = just include the variances (i.e. n)
+# If a full matrix, include all dimensions (i.e. n^2)
+r <- n^2
+# trait names
+traitnames <- c("centroid", "line9.10", "angle7.8.9", "angle3.10.4", "angle2.4.8")
+
+#### Load observed models for each treatment
+treats <- paste("m", rep(c("c_","h_","mc_","mh_","s_","t_"),2), rep(c("d","u"),each=6), sep="")
+
+Gnames <- paste(rep(c("d","u"),each=6), c("c","h", "mc", "mh", "s", "t"),sep="")
+MCMCarray <- array(,c(MCMCsamp,(n^2)*rfx+r,m)) 
+
+for (j in 1:12){
+  
+  load(paste("./G_observed/",treats[j],".Rdata", sep = ""))
+  
+  MCMCarray[,,j] <- as.matrix(mod$VCV[1:500,])
+  
+  rm(mod)
+}
+
+# Build the arrays for the components of each model
+## Each of the following arrays contain all components of the random effects from the observed models
+Gnames <- paste(rep(c("d","u"),each=6), c("c","h", "mc", "mh", "s", "t"),sep="")
+MCMCarray <- array(,c(MCMCsamp,(n^2)*rfx+r,m)) 
+
+dim(MCMCarray)
+MCMCarray[,,1] <- as.matrix(mc_d$VCV[1:500,])
+MCMCarray[,,2] <- as.matrix(mh_d$VCV[1:500,])
+MCMCarray[,,3] <- as.matrix(mmc_d$VCV[1:500,])
+MCMCarray[,,4] <- as.matrix(mmh_d$VCV[1:500,])
+MCMCarray[,,5] <- as.matrix(ms_d$VCV[1:500,])
+MCMCarray[,,6] <- as.matrix(mt_d$VCV[1:500,])
+
+MCMCarray[,,7] <- as.matrix(mc_u$VCV[1:500,])
+MCMCarray[,,8] <- as.matrix(mh_u$VCV[1:500,])
+MCMCarray[,,9] <- as.matrix(mmc_u$VCV[1:500,])
+MCMCarray[,,10] <- as.matrix(mmh_u$VCV[1:500,])
+MCMCarray[,,11] <- as.matrix(ms_u$VCV[1:500,])
+MCMCarray[,,12] <- as.matrix(mt_u$VCV[1:500,])
+
+# Construct arrays for each component
+G <- array(,c(n,n,m,MCMCsamp))
+dimnames(G) <- list(traitnames,traitnames,Gnames)
+M <- array(,c(n,n,m,MCMCsamp))
+dimnames(M) <- list(traitnames,traitnames,Gnames)
+B <- array(,c(n,n,m,MCMCsamp))
+dimnames(B) <- list(traitnames,traitnames,Gnames)
+R <- array(,c(n,n,m,MCMCsamp))
+dimnames(R) <- list(traitnames,traitnames,Gnames)
+
+for (i in 1:m){
+  for (j in 1:MCMCsamp){
+    
+    G[,,i,j] <- matrix(MCMCarray[j,1:(n^2),i],ncol= n)
+    M[,,i,j] <- matrix(MCMCarray[j,((n^2)+1):((n^2)*2),i],ncol= n)
+    B[,,i,j] <- matrix(MCMCarray[j,(((n^2)*2)+1):(((n^2)*3)),i])
+    R[,,i,j] <- matrix(MCMCarray[j,(((n^2)*3)+1):(((n^2)*3)+r),i],ncol=n)
+    
+    }
+}
+
+#### Construct dataframes based on null-differences in G ####
+# Simulate null differences in genetic effects among treatments. Genetic component for each individual is calculated by sampling breeding values (using rbv function) from a null G-matrix, which is the averaged of the observed G-matrices, at each MCMC iteration.
+
+sireEffects <-list()
+
+for (i in 1:MCMCsamp){
+      
+  tmp.sires <- list()
+
+  for (j in 1:6){
+      
+      # Construct pedigree
+      pedc <- newdat[[j]][,9:11]
+      pedh <- newdat[[6+j]][,9:11]
+      
+      # Calculate random breeding values based on null differences (average of all G-matrices)
+      tmp.sires[[j]] <- rbv(pedc,apply(G[,,1:6,i], 1:2, mean))
+      tmp.sires[[6+j]] <- rbv(pedh,apply(G[,,7:12,i], 1:2, mean))
+      
+  }
+  
+  sireEffects[[i]] <- do.call("rbind", tmp.sires)
+
+  rm(tmp.sires)
+} 
+
+# Construct the phenotypic data around the simulated additive genetic effects from above
+finalranddat <- list()
+
+for (i in 1:MCMCsamp){
+  
+  sireVals <- data.frame(sireEffects[[i]], mat=do.call("rbind", newdat)[,19])
+  damVals <- M[,,,i]
+  blockVals <- B[,,,i]
+  resVals <- R[,,,i]
+  
+  randdat <- list()
+  
+  for (j in 1:m){
+    
+      #### Replication to sample the Random Effects ####
+  # Replication at each level to construct each (non-Va) component
+      ndam <- length(unique(newdat[[j]]$dam[complete.cases(newdat[[j]]$dam)]))
+      nID <- dim(newdat[[j]])[1]
+      nBL <- 5 # number of replicate cages
+
+      # Replicate dam and residual components
+      damEffects  <- rmvnorm(ndam,rep(0,5), damVals[,,j])
+      block   <- rmvnorm(nBL,rep(0,5), blockVals[,,j])
+      resid   <- rmvnorm(nID,rep(0,5), resVals[,,j])
+
+      newdat[[j]]$dam[newdat[[j]]$id %in% unique(newdat[[j]]$dam)] <- newdat[[j]]$id[newdat[[j]]$id %in% unique(newdat[[j]]$dam)]
+      
+      mnfx.dat <- mnfx[[j]]
+      
+      # Add the sire, dam and residual data altogether to estimate the phenotypes
+      simData<-sireVals[sireVals$mat %in% unique(sireVals$mat)[j],1:5] + 
+          rbind(matrix(0, nrow=dim(newdat[[j]][newdat[[j]]$gen_code %in% "s",])[1], ncol=5),
+          damEffects[as.integer(as.factor(newdat[[j]]$dam[complete.cases(newdat[[j]]$dam)])),]) + 
+          block[as.integer(as.factor(newdat[[j]]$replicate)),] + resid +
+          mnfx.dat[as.integer(as.factor(newdat[[j]]$gen_code)),2:6]
+
+      newdat[[j]]$dam[newdat[[j]]$id %in% unique(newdat[[j]]$dam)] <- NA
+
+      colnames(simData) <- traitnames
+      
+      randdat[[j]] <- cbind(newdat[[j]][,1:12], simData)
+    
+  }
+  
+  dat.new <- do.call("rbind", randdat)
+  dat.new$mat <- paste(dat.new$assay, dat.new$treatment, sep="")
+  
+  finalranddat[[i]] <- dat.new
+  
+  rm(randdat, dat.new)
+  
+}
+
+
+save(finalranddat, file="data_rdm.Rdata")
+
+# Randomised data are then reapplied to each iteration in 'finalranddat'
+
+```
+
+## Re-applying equation 1 with the above data with null differences in G
+```{r, eval = FALSE}
+## Models with the null data are re-applied using the .Rdata files. A shell script (.sh file) is used on a cluster to run the R script below for each of the model implementations. This means that the shell script runs 500 R sessions, each one using a loop to calculate a null G for each treatment separately. (shell script pasted further below)
+
+load("data_rdm.Rdata")
+
+id <- as.numeric(commandArgs(TRUE))
+
+dat <- finalranddat[[id[1]]]
+
+mats <- unique(dat$mat)
+
+arr <- array(,c(5,5,length(mats)))
+
+for (i in 1:length(mats)){
+  
+dat.new <- droplevels(dat[dat$mat %in% mats[i],])
+
+# Create pedigree
+ped <- dat.new[,9:11]
+
+Ainv <- inverseA(ped)$Ainv
+
+p <- diag(apply(dat.new[13:17], 2, var))
+
+priorcau <- list(R = list(V = p*0.25, nu = 4.002),
+                 G = list(G1 = list(V = diag(5), nu = 5, alpha.mu = rep("0",5), alpha.V = p),
+                          G2 = list(V = diag(5), nu = 5, alpha.mu = rep("0",5), alpha.V = p),
+                          G3 = list(V = diag(5), nu = 5, alpha.mu = rep("0",5), alpha.V = p)))
+
+mod <- MCMCglmm(cbind(centroid, line9.10, angle7.8.9, angle3.10.4, angle2.4.8) ~ trait*sex - 1,
+                 random = ~ us(trait):id + us(trait):dam + us(trait):replicate,
+                 rcov = ~ us(trait):units,
+                 family = rep("gaussian",5),
+                 ginverse = list(id = Ainv),
+                 pr = F,
+                 #nitt = 1100000, burnin = 100000, thin = 1000, # Original models
+                 nitt = 200000, burnin = 100000, thin = 1000, # Reduced saved iterations to 100
+                 prior = priorcau, verbose = TRUE,
+                 data = dat.new)
+
+arr[,,i] <- matrix(colMeans(mod$VCV[,1:25]), ncol=5)
+
+rm(mod)
+
+}
+
+filename <- paste("rdm_", id[1], ".RData", sep="")
+
+save(arr, file=filename)
+
+```
+
+# Supplementary code 2:  SHELL SCRIPT (NOT RUN IN R) FOR CLUSTER
+```{r, eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=MYJOB
+#SBATCH --time=12:00:00
+#SBATCH --ntasks=1
+#SBATCH --mem-per-cpu=4096
+#SBATCH --cpus-per-task=1
+#SBATCH --array=1-100
+
+cd $SLURM_SUBMIT_DIR
+
+module load R
+
+i=${SLURM_ARRAY_TASK_ID}
+
+outFile="output_parameter_${i}"
+
+Rscript --vanilla mScript.R ${i} ${outFile}
+```
